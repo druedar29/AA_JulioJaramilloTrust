@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hipótesis ArenaAlfa</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500&display=swap">
+<script src="d3.min.js"></script>
+<style>
+  :root {
+    --font-anthropic-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-anthropic-serif: "Source Serif 4", Georgia, serif;
+    --cds-font-size-title: 1.75rem; --cds-font-size-heading: 1rem; --cds-font-size-body: 0.9375rem; --cds-font-size-caption: 0.8125rem;
+    --cds-font-weight-medium: 500;
+    --cds-gap-xs: 4px; --cds-gap-sm: 8px; --cds-gap-md: 12px; --cds-gap-lg: 20px;
+    --cds-pad-xs: 4px; --cds-pad-sm: 8px; --cds-pad-md: 12px; --cds-pad-lg: 16px;
+    --cds-radius: 8px; --cds-dur-slow: 300ms;
+    --color-bg: #f6f5f1; --color-panel: #ffffff; --color-fg: #1f1e1b; --color-fg-muted: #6b6a64; --color-border-line: #e3e1da;
+    --color-ok: #1f7a4d; --color-bad: #b4342d;
+    --cds-border: var(--color-border-line); --cds-surface-popover: #ffffff; --cds-shadow-popover: 0 6px 20px rgba(0,0,0,.12); --cds-text-secondary: var(--color-fg-muted);
+    --cds-chart-axis: #b9b7ae; --cds-chart-grid: #ecebe5; --cds-chart-reference: #8a8880;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-bg: #1a1918; --color-panel: #242321; --color-fg: #ecebe6; --color-fg-muted: #a3a19a; --color-border-line: #3a3936;
+      --color-ok: #5cc28f; --color-bad: #f07a72;
+      --cds-surface-popover: #2c2b29; --cds-shadow-popover: 0 6px 20px rgba(0,0,0,.5);
+      --cds-chart-axis: #6b6a64; --cds-chart-grid: #2f2e2b; --cds-chart-reference: #8a8880;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--color-bg); color: var(--color-fg); font-family: var(--font-anthropic-sans); -webkit-text-size-adjust: 100%; }
+  .pagina { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+  .dash-skeleton { color: transparent !important; background: linear-gradient(90deg, var(--color-border-line), var(--color-panel), var(--color-border-line)); background-size: 200% 100%; animation: sk 1.2s infinite linear; border-radius: 4px; }
+  @keyframes sk { to { background-position: -200% 0; } }
+  .pie { margin-top: 32px; font-size: 0.75rem; color: var(--color-fg-muted); }
+</style>
+<script>
+/* Mini-runtime: reemplaza al de Claude. Lee los JSON de ./data/ y ofrece la misma API `dash` que usa el tablero. */
+(() => {
+  const DEF = { activo: null, base: 'hoy', grupo: 'Todas', top: 'Todas' };
+  const FUENTES = { hipotesis: 'data/hipotesis.json', precios_ibkr: 'data/precios_ibkr.json' };
+  const store = {}; const calcs = []; const subs = [];
+  let params = { ...DEF };
+  for (const k of Object.keys(FUENTES)) store[k] = { status: 'loading', data: null };
+  const leerURL = () => { try { const q = new URLSearchParams(location.hash.slice(1)); for (const k of Object.keys(DEF)) if (q.has(k)) params[k] = q.get(k) || null; } catch {} };
+  const escribirURL = () => { try { const q = new URLSearchParams(); for (const [k, v] of Object.entries(params)) if (v != null && v !== DEF[k]) q.set(k, v); const h = q.toString(); history.replaceState(null, '', h ? '#' + h : location.pathname + location.search); } catch {} };
+  const recalcular = () => {
+    for (const c of calcs) {
+      const ins = c.inputs.map((i) => store[i] || { status: 'error' });
+      if (ins.some((x) => x.status === 'error')) store[c.id] = { status: 'error', data: null };
+      else if (ins.some((x) => x.status !== 'ok')) store[c.id] = { status: 'loading', data: null };
+      else { try { store[c.id] = { status: 'ok', data: c.fn(...ins.map((x) => x.data)) }; } catch (e) { console.error(e); store[c.id] = { status: 'error', data: null }; } }
+    }
+  };
+  const avisar = () => { for (const f of subs) { try { f(); } catch (e) { console.error(e); } } };
+  window.dash = {
+    colors: ['#2a78b5', '#d08a2c', '#4a9a6a'],
+    calc(id, spec) { calcs.push({ id, inputs: spec.inputs, fn: spec.fn }); },
+    data(id) { return store[id] || { status: 'error', data: null }; },
+    params() { return { ...params }; },
+    setParams(p) { params = { ...params, ...p }; escribirURL(); avisar(); },
+    resetParams() { params = { ...DEF }; escribirURL(); avisar(); },
+    onData(f) { subs.push(f); recalcular(); f(); },
+  };
+  leerURL();
+  const v = Math.floor(Date.now() / 3.6e6); // evita la caché del navegador más de una hora
+  window.addEventListener('DOMContentLoaded', () => {
+    Promise.all(Object.entries(FUENTES).map(([k, url]) =>
+      fetch(url + '?v=' + v).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then((d) => { store[k] = { status: 'ok', data: d }; })
+        .catch((e) => { console.error(k, e); store[k] = { status: 'error', data: null }; })
+    )).then(() => { recalcular(); avisar(); });
+  });
+})();
+</script>
+</head>
+<body>
+<main class="pagina">
+<style>
+  .hx { display: grid; gap: var(--cds-gap-lg); font-family: var(--font-anthropic-sans); color: var(--color-fg); }
+  .hx-head { display: grid; gap: var(--cds-gap-xs); }
+  .hx-title { margin: 0; font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); line-height: 1.2; text-wrap: balance; }
+  .hx-lead { margin: 0; max-width: 72ch; color: var(--color-fg-muted); font-size: var(--cds-font-size-body); line-height: 1.5; }
+  .hx .hx-lead b { font-weight: var(--cds-font-weight-medium); color: var(--color-fg); font-variant-numeric: tabular-nums; }
+  .hx-status { margin: 0; max-width: 80ch; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); line-height: 1.5; }
+  .hx .hx-status b { font-weight: var(--cds-font-weight-medium); color: var(--color-fg); font-variant-numeric: tabular-nums; }
+
+  .hx-filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--cds-gap-sm); }
+  .hx-seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background: var(--color-bg); }
+  .hx-seg button, .hx-btn { font: inherit; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); background: transparent; border: 0; border-radius: var(--cds-radius); padding: var(--cds-pad-xs) var(--cds-pad-sm); cursor: pointer; display: inline-flex; align-items: center; gap: var(--cds-gap-xs); line-height: 1.3; }
+  .hx-seg button:hover, .hx-btn:hover { color: var(--color-fg); }
+  .hx-seg button[aria-pressed="true"] { background: var(--color-panel); color: var(--color-fg); box-shadow: inset 0 0 0 1px var(--color-border-line); }
+  .hx-btn { border: 1px solid var(--color-border-line); background: var(--color-bg); }
+  .hx button:focus-visible, .hx input:focus-visible, .hx select:focus-visible, .hx tr:focus-visible { outline: 2px solid var(--color-fg); outline-offset: 1px; }
+  .hx-sw { width: 0.625rem; height: 0.625rem; border-radius: 2px; display: inline-block; flex: none; }
+
+  .hx-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr)); gap: var(--cds-gap-md); }
+  .hx-kpi { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-xs); align-content: start; min-width: 0; }
+  .hx-kpi-l { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .hx-kpi-v { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); line-height: 1.15; font-variant-numeric: tabular-nums; min-height: 1.15em; }
+  .hx-kpi-s { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+  .hx-ref { white-space: nowrap; }
+
+  .hx-cols { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); align-items: flex-start; }
+  .hx-col { flex: 1 1 22rem; min-width: 0; display: grid; gap: var(--cds-gap-md); }
+  .hx-card { min-width: 0; background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-sm); align-content: start; }
+  .hx-card h2 { margin: 0; font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); line-height: 1.3; }
+  .hx-note { margin: 0; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); line-height: 1.45; }
+  .hx-chart { position: relative; width: 100%; min-height: 160px; }
+  .hx-chart svg { display: block; }
+  .hx-chart text { font-family: var(--font-anthropic-sans); font-size: var(--cds-font-size-caption); fill: var(--color-fg-muted); }
+  .hx-chart text.hx-strong { fill: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+  .hx-chart .hx-hit { cursor: pointer; }
+  .hx-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .hx-legend span { display: inline-flex; align-items: center; gap: var(--cds-gap-xs); }
+  .hx-legend .hx-star { color: var(--color-fg); line-height: 1; }
+  .hx-chart tspan.hx-star-t { fill: var(--color-fg); }
+  .hx-tip { position: absolute; z-index: 5; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); max-width: 19rem; display: grid; gap: 2px; font-variant-numeric: tabular-nums; }
+  .hx-tip .k { color: var(--cds-text-secondary); }
+  .hx-fail { display: flex; align-items: center; justify-content: center; gap: var(--cds-gap-xs); min-height: 160px; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .hx-fail::before { content: ""; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--color-bad); }
+  .hx-empty { margin: 0; padding: var(--cds-pad-md) 0; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+
+  .hx-tablecard { container-type: inline-size; }
+  .hx-tools { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); align-items: center; }
+  .hx-tools input, .hx-tools select { font: inherit; font-size: var(--cds-font-size-caption); color: var(--color-fg); background: var(--color-bg); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-xs) var(--cds-pad-sm); min-width: 0; max-width: 100%; }
+  .hx-tools input { flex: 1 1 12rem; }
+  .hx-tablebox { max-height: 34rem; overflow: auto; border-top: 1px solid var(--color-border-line); }
+  .hx-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+  .hx-table th { position: sticky; top: 0; z-index: 1; background: var(--color-panel); text-align: left; font-weight: var(--cds-font-weight-medium); color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border-line); padding: 0; white-space: nowrap; vertical-align: bottom; }
+  .hx-table th button { font: inherit; color: inherit; background: none; border: 0; padding: var(--cds-pad-xs) var(--cds-pad-sm); cursor: pointer; width: 100%; text-align: inherit; white-space: nowrap; }
+  .hx-table th[aria-sort="ascending"] button::after { content: " ↑"; }
+  .hx-table th[aria-sort="descending"] button::after { content: " ↓"; }
+  .hx-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+  .hx-table .num { text-align: right; }
+  .hx-table tbody tr { cursor: pointer; }
+  .hx-table tbody tr:hover td { background: var(--color-bg); }
+  .hx-table tbody tr.is-sel td { background: var(--color-bg); }
+  /* columna «Activo» fija al desplazar la tabla hacia los lados */
+  .hx-table th:first-child, .hx-table td:first-child { position: sticky; left: 0; }
+  .hx-table th:first-child { z-index: 3; box-shadow: inset -1px 0 0 var(--color-border-line); }
+  .hx-table td:first-child { z-index: 1; background: var(--color-panel); box-shadow: inset -1px 0 0 var(--color-border-line); }
+  .hx-table tbody tr.is-sel td:first-child { box-shadow: inset 3px 0 0 var(--color-fg), inset -1px 0 0 var(--color-border-line); }
+  .hx-tk { font-weight: var(--cds-font-weight-medium); color: var(--color-fg); }
+  .hx-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; display: inline-block; margin-right: var(--cds-gap-xs); vertical-align: 0.05em; }
+  .hx-pill { display: inline-block; padding: 0 var(--cds-pad-sm); border: 1px solid var(--color-border-line); border-radius: 999px; line-height: 1.6; }
+  .hx-pos { color: var(--color-ok); }
+  .hx-neg { color: var(--color-bad); }
+  .hx-muted { color: var(--color-fg-muted); }
+  .hx-potcell { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--cds-gap-xs); }
+  .hx-bar { display: inline-block; height: 0.5rem; border-radius: 4px; }
+  @container (max-width: 44rem) { .hx-table .hx-sec { display: none; } }
+
+  .hx-notes ul { margin: 0; padding-left: 1.1rem; display: grid; gap: var(--cds-gap-xs); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); line-height: 1.45; }
+  .hx-notes ul:empty { display: none; }
+  .hx-notes b { color: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+  [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+</style>
+
+<div class="hx" id="hipotesis-tablero">
+  <header class="hx-head" id="resumen">
+    <h1 class="hx-title" id="titulo">Hipótesis ArenaAlfa · corte 21 oct 2026</h1>
+    <p class="hx-lead" id="conclusion"><span id="lead-base" data-texto-hoy="Con los últimos precios de IBKR" data-texto-informe="Con los precios del informe">Con los últimos precios de IBKR</span>, en zona de compra hay <b data-lead="Zona de compra|n" data-source="resumen" data-field="n" data-where="base=hoy&amp;grupo=Zona de compra&amp;top=Todas" class="dash-skeleton">—</b> hipótesis, con potencial mediano de <b data-lead="Zona de compra|potencial_mediano" data-source="resumen" data-field="potencial_mediano" data-where="base=hoy&amp;grupo=Zona de compra&amp;top=Todas" class="dash-skeleton">—</b> al escenario base; en la intermedia, <b data-lead="Zona intermedia|n" data-source="resumen" data-field="n" data-where="base=hoy&amp;grupo=Zona intermedia&amp;top=Todas" class="dash-skeleton">—</b> con <b data-lead="Zona intermedia|potencial_mediano" data-source="resumen" data-field="potencial_mediano" data-where="base=hoy&amp;grupo=Zona intermedia&amp;top=Todas" class="dash-skeleton">—</b>; y en la de objetivos, <b data-lead="Zona de objetivos|n" data-source="resumen" data-field="n" data-where="base=hoy&amp;grupo=Zona de objetivos&amp;top=Todas" class="dash-skeleton">—</b> con <b data-lead="Zona de objetivos|potencial_mediano" data-source="resumen" data-field="potencial_mediano" data-where="base=hoy&amp;grupo=Zona de objetivos&amp;top=Todas" class="dash-skeleton">—</b>.</p>
+    <p class="hx-lead" id="conclusion-precios">Desde el informe, el precio mediano cambió <b data-lead="Todas|cambio_mediano" data-source="resumen" data-field="cambio_mediano" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</b>: bajaron <b data-lead="Todas|n_bajan" data-source="resumen" data-field="n_bajan" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</b> y subieron <b data-lead="Todas|n_suben" data-source="resumen" data-field="n_suben" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</b>. Las mayores caídas son <span id="lead-caidas" class="dash-skeleton">—</span>; la mayor subida, <span id="lead-subida" class="dash-skeleton">—</span>.</p>
+    <p class="hx-status" id="estado-precios">Últimos precios: Interactive Brokers, <b data-estado="fecha" data-source="estado_precios" data-field="fecha" data-row="0" class="dash-skeleton">—</b>, de <b data-estado="hora_desde" data-source="estado_precios" data-field="hora_desde" data-row="0" class="dash-skeleton">—</b> a <b data-estado="hora_hasta" data-source="estado_precios" data-field="hora_hasta" data-row="0" class="dash-skeleton">—</b> (hora de Bogotá)<span id="estado-otros" hidden>; <b data-estado="n_otro_dia" data-source="estado_precios" data-field="n_otro_dia" data-row="0" class="dash-skeleton">—</b> son de un día anterior</span>. De <b data-estado="n_precios" data-source="estado_precios" data-field="n_precios" data-row="0" class="dash-skeleton">—</b> precios, <b data-estado="n_tiempo_real" data-source="estado_precios" data-field="n_tiempo_real" data-row="0" class="dash-skeleton">—</b> son la última operación en tiempo real y <b data-estado="n_valoracion" data-source="estado_precios" data-field="n_valoracion" data-row="0" class="dash-skeleton">—</b> el precio de valoración de IBKR. Se actualizan cada día hábil después del cierre de Nueva York.</p>
+  </header>
+
+  <div class="hx-filters" id="filtros">
+    <div class="hx-seg" id="f-base" role="group" aria-label="Precios usados">
+      <button type="button" data-base="hoy" aria-pressed="true">Últimos precios (IBKR)</button>
+      <button type="button" data-base="informe" aria-pressed="false">Precios del informe</button>
+    </div>
+    <div class="hx-seg" id="f-grupo" role="group" aria-label="Zona">
+      <button type="button" data-grupo="Todas" aria-pressed="true">Todas las zonas</button>
+      <button type="button" data-grupo="Zona de compra" aria-pressed="false"><i class="hx-sw"></i>Zona de compra</button>
+      <button type="button" data-grupo="Zona intermedia" aria-pressed="false"><i class="hx-sw"></i>Zona intermedia</button>
+      <button type="button" data-grupo="Zona de objetivos" aria-pressed="false"><i class="hx-sw"></i>Zona de objetivos</button>
+    </div>
+    <div class="hx-seg" id="f-top" role="group" aria-label="Etiqueta TOP">
+      <button type="button" data-top="Todas" aria-pressed="true">Todas</button>
+      <button type="button" data-top="TOP" aria-pressed="false">Solo TOP</button>
+    </div>
+    <button type="button" class="hx-btn" id="f-activo" hidden></button>
+    <button type="button" class="hx-btn" id="f-reset">Quitar filtros</button>
+  </div>
+
+  <section class="hx-kpis" id="indicadores" aria-label="Indicadores">
+    <div class="hx-kpi" id="kpi-n">
+      <span class="hx-kpi-l">Hipótesis</span>
+      <span class="hx-kpi-v dash-skeleton" data-kpi="n" data-source="resumen" data-field="n" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas">—</span>
+      <span class="hx-kpi-s"><span data-kpi="n_top" data-source="resumen" data-field="n_top" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span> con etiqueta TOP</span>
+    </div>
+    <div class="hx-kpi" id="kpi-potencial">
+      <span class="hx-kpi-l">Potencial mediano al escenario base</span>
+      <span class="hx-kpi-v dash-skeleton" data-kpi="potencial_mediano" data-source="resumen" data-field="potencial_mediano" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas">—</span>
+      <span class="hx-kpi-s"><span data-texto-hoy="Con el último precio" data-texto-informe="Con el precio del informe">Con el último precio</span><span class="hx-ref"> · informe: <span data-kpi-ref="potencial_mediano" data-source="resumen" data-field="potencial_mediano" data-where="base=informe&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span></span></span>
+    </div>
+    <div class="hx-kpi" id="kpi-potencial-50">
+      <span class="hx-kpi-l">Con potencial de 50 % o más</span>
+      <span class="hx-kpi-v dash-skeleton" data-kpi="n_potencial_50" data-source="resumen" data-field="n_potencial_50" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas">—</span>
+      <span class="hx-kpi-s">Hipótesis con al menos +50 % al escenario base<span class="hx-ref"> · informe: <span data-kpi-ref="n_potencial_50" data-source="resumen" data-field="n_potencial_50" data-where="base=informe&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span></span></span>
+    </div>
+    <div class="hx-kpi" id="kpi-variacion">
+      <span class="hx-kpi-l">Variación mediana desde el inicio</span>
+      <span class="hx-kpi-v dash-skeleton" data-kpi="variacion_mediana" data-source="resumen" data-field="variacion_mediana" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas">—</span>
+      <span class="hx-kpi-s"><span data-texto-hoy="Estimada con el último precio" data-texto-informe="Columna «Variación hipótesis»">Estimada con el último precio</span><span class="hx-ref"> · informe: <span data-kpi-ref="variacion_mediana" data-source="resumen" data-field="variacion_mediana" data-where="base=informe&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span></span></span>
+    </div>
+    <div class="hx-kpi" id="kpi-perdida">
+      <span class="hx-kpi-l">En pérdida desde el inicio</span>
+      <span class="hx-kpi-v dash-skeleton" data-kpi="n_en_perdida" data-source="resumen" data-field="n_en_perdida" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas">—</span>
+      <span class="hx-kpi-s">Hipótesis con variación negativa<span class="hx-ref"> · informe: <span data-kpi-ref="n_en_perdida" data-source="resumen" data-field="n_en_perdida" data-where="base=informe&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span></span></span>
+    </div>
+    <div class="hx-kpi" id="kpi-cambio">
+      <span class="hx-kpi-l">Cambio mediano del precio desde el informe</span>
+      <span class="hx-kpi-v dash-skeleton" data-kpi="cambio_mediano" data-source="resumen" data-field="cambio_mediano" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas">—</span>
+      <span class="hx-kpi-s"><span data-kpi="n_bajan" data-source="resumen" data-field="n_bajan" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span> bajan y <span data-kpi="n_suben" data-source="resumen" data-field="n_suben" data-where="base=hoy&amp;grupo=Todas&amp;top=Todas" class="dash-skeleton">—</span> suben</span>
+    </div>
+  </section>
+
+  <div class="hx-legend" id="leyenda" aria-label="Colores por zona y marca de las TOP">
+    <span><i class="hx-sw" data-sw="Zona de compra"></i>Zona de compra</span>
+    <span><i class="hx-sw" data-sw="Zona intermedia"></i>Zona intermedia</span>
+    <span><i class="hx-sw" data-sw="Zona de objetivos"></i>Zona de objetivos</span>
+    <span><span class="hx-star" aria-hidden="true">★</span>Etiqueta TOP</span>
+  </div>
+
+  <div class="hx-cols">
+    <div class="hx-col">
+      <section class="hx-card" id="card-potencial">
+        <h2 id="h-potencial">Potencial al escenario base, por activo</h2>
+        <p class="hx-note" data-texto-hoy="Escenario base ÷ último precio en IBKR − 1. La raya fina marca el potencial con el precio del informe. Haz clic en una barra para resaltar el activo en todo el tablero." data-texto-informe="Escenario base ÷ precio del informe − 1. Haz clic en una barra para resaltar el activo en todo el tablero.">Escenario base ÷ último precio en IBKR − 1. La raya fina marca el potencial con el precio del informe. Haz clic en una barra para resaltar el activo en todo el tablero.</p>
+        <div class="hx-chart dash-skeleton" id="chart-potencial" data-source="hipotesis actual"></div>
+      </section>
+    </div>
+    <div class="hx-col">
+      <section class="hx-card" id="card-cambio">
+        <h2 id="h-cambio">Cambio de precio desde el informe</h2>
+        <p class="hx-note">Último precio en IBKR ÷ precio del informe − 1. QRVO usa su valor equivalente tras la fusión con Skyworks.</p>
+        <div class="hx-chart dash-skeleton" id="chart-cambio" data-source="hipotesis actual"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="hx-cols">
+    <div class="hx-col">
+      <section class="hx-card" id="card-dispersion">
+        <h2 id="h-dispersion">Variación desde el inicio frente a potencial</h2>
+        <p class="hx-note" data-texto-hoy="Con los últimos precios; la variación es una estimación (ver notas). Arriba a la izquierda: hipótesis que caen desde su inicio y aún tienen recorrido hasta el escenario base. Abajo a la derecha: suben y ya superan ese escenario." data-texto-informe="Con los precios del informe. Arriba a la izquierda: hipótesis que caen desde su inicio y aún tienen recorrido hasta el escenario base. Abajo a la derecha: suben y ya superan ese escenario.">Con los últimos precios; la variación es una estimación (ver notas). Arriba a la izquierda: hipótesis que caen desde su inicio y aún tienen recorrido hasta el escenario base. Abajo a la derecha: suben y ya superan ese escenario.</p>
+        <div class="hx-chart dash-skeleton" id="chart-dispersion" data-source="hipotesis actual"></div>
+      </section>
+    </div>
+    <div class="hx-col">
+      <section class="hx-card" id="card-zona">
+        <h2 id="h-zona">Hipótesis por zona actual</h2>
+        <p class="hx-note">Etiqueta de la columna «Zona actual» de cada tabla del informe; no se recalcula con el último precio.</p>
+        <div class="hx-chart dash-skeleton" id="chart-zona" data-source="por_zona"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="hx-cols">
+    <div class="hx-col">
+      <section class="hx-card" id="card-anio">
+        <h2 id="h-anio">Hipótesis por año de inicio</h2>
+        <p class="hx-note">Año de la columna «Desde». Con todas las zonas, cada barra se divide por zona.</p>
+        <div class="hx-chart dash-skeleton" id="chart-anio" data-source="por_anio"></div>
+      </section>
+    </div>
+    <div class="hx-col">
+      <section class="hx-card" id="card-posicion">
+        <h2 id="h-posicion">Parte de la posición que sigue activa</h2>
+        <p class="hx-note">Columna «% activo de la posición». El informe no la define; un valor bajo 100 % sugiere una toma parcial.</p>
+        <div class="hx-chart dash-skeleton" id="chart-posicion" data-source="por_posicion"></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="hx-card hx-tablecard" id="tabla">
+    <h2 id="h-tabla">Todas las hipótesis</h2>
+    <p class="hx-note">Sigue los filtros de arriba; «Variación» y «Potencial» usan los precios elegidos. Busca por ticker o empresa, filtra por zona actual y ordena con un clic en cada columna. Un clic en una fila resalta el activo en los gráficos.</p>
+    <div class="hx-tools">
+      <input id="t-buscar" type="search" placeholder="Buscar ticker o empresa" aria-label="Buscar ticker o empresa" autocomplete="off">
+      <select id="t-zona" aria-label="Zona actual"><option value="">Todas las zonas actuales</option></select>
+    </div>
+    <div class="hx-tablebox">
+      <table class="hx-table" id="tabla-hipotesis" data-source="hipotesis" data-row-key="activo">
+        <thead>
+          <tr>
+            <th data-field="activo" aria-sort="none"><button type="button" data-sort="activo">Activo</button></th>
+            <th data-field="empresa" class="hx-sec" aria-sort="none"><button type="button" data-sort="empresa">Empresa</button></th>
+            <th data-field="grupo" class="hx-sec" aria-sort="none"><button type="button" data-sort="grupo">Zona</button></th>
+            <th data-field="zona_actual" aria-sort="none"><button type="button" data-sort="zona_actual">Zona actual</button></th>
+            <th data-field="top" aria-sort="none"><button type="button" data-sort="top">TOP</button></th>
+            <th data-field="precio" class="num" aria-sort="none"><button type="button" data-sort="precio">Precio del informe</button></th>
+            <th data-source="actual" data-field="precio_hoy" class="num" aria-sort="none"><button type="button" data-sort="precio_hoy">Último precio (IBKR)</button></th>
+            <th data-source="actual" data-field="cambio_desde_informe" class="num" aria-sort="none"><button type="button" data-sort="cambio">Cambio desde el informe</button></th>
+            <th id="th-variacion" data-source="actual" data-field="variacion_hoy" class="num" aria-sort="none"><button type="button" data-sort="vari" data-texto-hoy="Variación hipótesis (estimada)" data-texto-informe="Variación hipótesis">Variación hipótesis (estimada)</button></th>
+            <th data-field="escenario_base" class="num" aria-sort="none"><button type="button" data-sort="escenario_base">Escenario base</button></th>
+            <th id="th-potencial" data-source="actual" data-field="potencial_hoy" class="num" aria-sort="none"><button type="button" data-sort="pot" data-texto-hoy="Potencial a base (último precio)" data-texto-informe="Potencial a base (informe)">Potencial a base (último precio)</button></th>
+            <th data-field="posicion_abierta" class="num hx-sec" aria-sort="none"><button type="button" data-sort="posicion_abierta">% activo de la posición</button></th>
+            <th data-field="desde_texto" class="hx-sec" aria-sort="none"><button type="button" data-sort="desde">Desde</button></th>
+            <th data-source="actual" data-field="tipo_precio" class="hx-sec" aria-sort="none"><button type="button" data-sort="tipo_precio">Tipo de precio IBKR</button></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="hx-empty" id="tabla-vacia" hidden>Ninguna hipótesis coincide con la búsqueda y los filtros.</p>
+    </div>
+  </section>
+
+  <section class="hx-card hx-notes" id="notas">
+    <h2 id="h-notas">Notas sobre los datos</h2>
+    <ul id="notas-precios"></ul>
+    <ul id="notas-lista"></ul>
+    <ul>
+      <li><b>Últimos precios</b>: salen de tu cuenta de Interactive Brokers (IBKR), con una consulta por activo. Una tarea programada los vuelve a consultar cada día hábil después del cierre de Nueva York y reemplaza el archivo; entre una actualización y otra, el tablero muestra los guardados. El conector entrega un precio por consulta y limita cuántas se pueden hacer por minuto, así que el tablero no puede pedirlos cada vez que se abre.</li>
+      <li><b>Precios del informe</b>: coinciden con los cierres del 20 oct 2026 en IBKR, aunque el informe tiene fecha del 21 oct.</li>
+      <li><b>Variación con los últimos precios</b>: es una estimación. Se toma el precio de inicio que implica el informe, precio ÷ (1 + variación), y se compara con el último precio.</li>
+      <li><b>Zonas</b>: la zona y la «Zona actual» son las del informe. No se recalculan con el último precio porque el informe no publica sus umbrales.</li>
+      <li><b>TENCENT</b>: no se consultó en IBKR porque el informe no le da precio ni escenario base con los que compararlo.</li>
+      <li>Fuente: informe «Seguimiento niveles Hipotesis: 21-Oct-2026» (ArenaAlfa). Sus tres tablas venían como imágenes; se pasaron a texto y se verificaron celda por celda.</li>
+      <li>El informe no define «Variación hipótesis», «% activo de la posición» ni la etiqueta TOP.</li>
+      <li>Las tablas solo traen el escenario base; los objetivos negativo y optimista no aparecen.</li>
+      <li>El texto del informe menciona estadísticas del servicio que no venían en el archivo.</li>
+      <li>El autor presenta el informe como contenido educativo, no como asesoría ni recomendación de compra o venta.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+(() => {
+  const GRUPOS = ['Zona de compra', 'Zona intermedia', 'Zona de objetivos'];
+  const colorDe = (g) => dash.colors[Math.max(0, GRUPOS.indexOf(g))];
+  const pct1 = d3.format('+.1%');
+  const pct0 = d3.format('.0%');
+  const SIMBOLO = { USD: '$', EUR: '€', CHF: 'CHF ' };
+  const decimales = (v) => (Math.abs(v) < 10 && Math.round(Math.abs(v) * 1000) % 10 !== 0 ? 3 : 2);
+  const dinero = (v, m) => (v == null ? '—' : (SIMBOLO[m] || '$') + v.toFixed(decimales(v)));
+  const val = (v) => (v == null || v === '' ? null : Number(v));
+  const enc = (s) => String(s).replace(/%/g, '%25').replace(/&/g, '%26').replace(/=/g, '%3D');
+  const donde = (o) => Object.entries(o).map(([k, v]) => enc(k) + '=' + enc(v)).join('&');
+  const PORCENTAJES = ['potencial_mediano', 'variacion_mediana', 'cambio_mediano'];
+  const fmtCampo = (f, v) => (v == null ? '—' : PORCENTAJES.includes(f) ? pct1(v) : String(v));
+  const signo = (v) => (v == null || v === 0 ? 'hx-muted' : v < 0 ? 'hx-neg' : 'hx-pos');
+  const CLAVE_NUM = ['precio', 'precio_hoy', 'cambio', 'vari', 'escenario_base', 'pot', 'posicion_abierta'];
+
+  // ---------- Cálculos (los lectores ven su código en Fuentes) ----------
+  dash.calc('actual', {
+    inputs: ['hipotesis', 'precios_ibkr'],
+    title: 'Último precio y potencial',
+    description: 'Cada hipótesis con su precio de IBKR, y con él el cambio desde el precio del informe, el potencial al escenario base y la variación desde el inicio (estimada). QRVO vale 32.50 USD más 0.960 acciones de SWKS por la fusión con Skyworks.',
+    fn: (hipotesis, precios_ibkr) => {
+      const num = (v) => (v == null || v === '' ? null : Number(v));
+      const ibkr = new Map(precios_ibkr.map((p) => [p.activo, p]));
+      return hipotesis.map((d) => {
+        const p = ibkr.get(d.activo) || {};
+        let hoy = num(p.precio);
+        const fusion = d.activo === 'QRVO' && hoy != null;
+        if (fusion) hoy = 32.5 + 0.96 * hoy; // canje de la fusión: 32.50 USD + 0.960 SWKS por acción
+        const informe = num(d.precio);
+        const base = num(d.escenario_base);
+        const variacion = num(d.variacion);
+        const ambos = hoy != null && informe != null;
+        return {
+          activo: d.activo,
+          precio_hoy: hoy,
+          moneda_hoy: p.moneda || '',
+          cambio_desde_informe: ambos ? hoy / informe - 1 : null,
+          potencial_hoy: hoy != null && base != null ? base / hoy - 1 : null,
+          variacion_hoy: ambos && variacion != null ? (1 + variacion) * hoy / informe - 1 : null,
+          tipo_precio: fusion ? 'Equivalente por fusión (SWKS)' : p.tipo_precio || '',
+          hora_bogota: p.hora_bogota || '',
+        };
+      });
+    },
+  });
+
+  dash.calc('resumen', {
+    inputs: ['hipotesis', 'actual'],
+    title: 'Resumen por zona',
+    description: 'Para cada zona (y todas), para las TOP (y todas) y con los últimos precios de IBKR (base «hoy») o los del informe: número de hipótesis, potencial y variación medianos, conteos clave y cambio mediano del precio desde el informe.',
+    fn: (hipotesis, actual) => {
+      const num = (v) => (v == null || v === '' ? null : Number(v));
+      const mediana = (xs) => {
+        const s = xs.slice().sort((a, b) => a - b);
+        const n = s.length;
+        if (!n) return null;
+        return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+      };
+      const hoy = new Map(actual.map((a) => [a.activo, a]));
+      const out = [];
+      for (const base of ['hoy', 'informe']) {
+        const de = (d, campoHoy, campoInforme) => num(base === 'hoy' ? (hoy.get(d.activo) || {})[campoHoy] : d[campoInforme]);
+        for (const grupo of ['Todas', 'Zona de compra', 'Zona intermedia', 'Zona de objetivos']) {
+          for (const top of ['Todas', 'TOP']) {
+            const r = hipotesis.filter((d) => (grupo === 'Todas' || d.grupo === grupo) && (top === 'Todas' || d.top === 'TOP'));
+            const pot = r.map((d) => de(d, 'potencial_hoy', 'potencial')).filter((v) => v !== null);
+            const vari = r.map((d) => de(d, 'variacion_hoy', 'variacion')).filter((v) => v !== null);
+            const cambio = r.map((d) => num((hoy.get(d.activo) || {}).cambio_desde_informe)).filter((v) => v !== null);
+            out.push({
+              base,
+              grupo,
+              top,
+              n: r.length,
+              n_top: r.filter((d) => d.top === 'TOP').length,
+              potencial_mediano: mediana(pot),
+              n_potencial_50: pot.filter((v) => v >= 0.5).length,
+              variacion_mediana: mediana(vari),
+              n_en_perdida: vari.filter((v) => v < 0).length,
+              cambio_mediano: mediana(cambio),
+              n_bajan: cambio.filter((v) => v < 0).length,
+              n_suben: cambio.filter((v) => v > 0).length,
+            });
+          }
+        }
+      }
+      return out;
+    },
+  });
+
+  dash.calc('estado_precios', {
+    inputs: ['precios_ibkr'],
+    title: 'Hora de los precios',
+    description: 'Cuántos precios trae el archivo de IBKR, cuántos son la última operación en tiempo real, de qué día son los más recientes, entre qué horas (Bogotá) se tomaron ese día y cuántos son de un día anterior.',
+    fn: (precios_ibkr) => {
+      const r = precios_ibkr.slice().sort((a, b) => String(a.fecha_hora_utc).localeCompare(String(b.fecha_hora_utc)));
+      const dia = (p) => String(p.hora_bogota).slice(0, -6);
+      const hora = (p) => String(p.hora_bogota).slice(-5);
+      const postrero = r[r.length - 1];
+      const fecha = postrero ? dia(postrero) : null;
+      const delDia = r.filter((p) => dia(p) === fecha);
+      return [{
+        n_precios: r.length,
+        n_tiempo_real: r.filter((p) => p.estado_datos === 'Tiempo real').length,
+        n_valoracion: r.filter((p) => p.tipo_precio === 'Valoración de IBKR').length,
+        fecha,
+        hora_desde: delDia.length ? hora(delDia[0]) : null,
+        hora_hasta: postrero ? hora(postrero) : null,
+        n_otro_dia: r.length - delDia.length,
+      }];
+    },
+  });
+
+  dash.calc('por_zona', {
+    inputs: ['hipotesis'],
+    title: 'Hipótesis por zona actual',
+    description: 'Número de hipótesis por etiqueta de «Zona actual», para todas y para las TOP.',
+    fn: (hipotesis) => {
+      const out = [];
+      for (const top of ['Todas', 'TOP']) {
+        const cuenta = new Map();
+        for (const d of hipotesis) {
+          if (top === 'TOP' && d.top !== 'TOP') continue;
+          const k = d.grupo + '\u0001' + d.zona_actual;
+          cuenta.set(k, (cuenta.get(k) || 0) + 1);
+        }
+        for (const [k, n] of cuenta) {
+          const [grupo, zona_actual] = k.split('\u0001');
+          out.push({ top, grupo, zona_actual, n });
+        }
+      }
+      return out;
+    },
+  });
+
+  dash.calc('por_anio', {
+    inputs: ['hipotesis'],
+    title: 'Hipótesis por año de inicio',
+    description: 'Número de hipótesis según el año de la columna «Desde», por zona y en total, para todas y para las TOP.',
+    fn: (hipotesis) => {
+      const anios = [...new Set(hipotesis.map((d) => Number(d.anio_inicio)))].sort((a, b) => a - b);
+      const out = [];
+      for (const top of ['Todas', 'TOP']) {
+        for (const grupo of ['Todas', 'Zona de compra', 'Zona intermedia', 'Zona de objetivos']) {
+          const r = hipotesis.filter((d) => (top === 'Todas' || d.top === 'TOP') && (grupo === 'Todas' || d.grupo === grupo));
+          for (const anio of anios) out.push({ top, grupo, anio, n: r.filter((d) => Number(d.anio_inicio) === anio).length });
+        }
+      }
+      return out;
+    },
+  });
+
+  dash.calc('por_posicion', {
+    inputs: ['hipotesis'],
+    title: 'Hipótesis por % activo de la posición',
+    description: 'Número de hipótesis según su «% activo de la posición», por zona y en total, para todas y para las TOP.',
+    fn: (hipotesis) => {
+      const niveles = [...new Set(hipotesis.map((d) => Number(d.posicion_abierta)))].sort((a, b) => b - a);
+      const out = [];
+      for (const top of ['Todas', 'TOP']) {
+        for (const grupo of ['Todas', 'Zona de compra', 'Zona intermedia', 'Zona de objetivos']) {
+          const r = hipotesis.filter((d) => (top === 'Todas' || d.top === 'TOP') && (grupo === 'Todas' || d.grupo === grupo));
+          for (const posicion_abierta of niveles) out.push({ top, grupo, posicion_abierta, n: r.filter((d) => Number(d.posicion_abierta) === posicion_abierta).length });
+        }
+      }
+      return out;
+    },
+  });
+
+  // ---------- Estado de la página ----------
+  const local = { q: '', zona: '', sort: null, dir: 1 };
+  let ultimo = { visibles: [], activo: null, base: 'hoy' };
+
+  document.querySelectorAll('[data-grupo] .hx-sw').forEach((sw) => { sw.style.background = colorDe(sw.parentElement.dataset.grupo); });
+  document.querySelectorAll('[data-sw]').forEach((sw) => { sw.style.background = colorDe(sw.dataset.sw); });
+
+  const segBase = document.getElementById('f-base');
+  const segGrupo = document.getElementById('f-grupo');
+  const segTop = document.getElementById('f-top');
+  const elegido = document.getElementById('f-activo');
+  const buscar = document.getElementById('t-buscar');
+  const zonaSel = document.getElementById('t-zona');
+
+  segBase.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-base]');
+    if (b) dash.setParams({ base: b.dataset.base });
+  });
+  segGrupo.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-grupo]');
+    if (b) dash.setParams({ grupo: b.dataset.grupo });
+  });
+  segTop.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-top]');
+    if (b) dash.setParams({ top: b.dataset.top });
+  });
+  elegido.addEventListener('click', () => dash.setParams({ activo: null }));
+  document.getElementById('f-reset').addEventListener('click', () => {
+    local.q = ''; local.zona = ''; local.sort = null; local.dir = 1;
+    buscar.value = ''; zonaSel.value = '';
+    dash.resetParams();
+  });
+  buscar.addEventListener('input', () => { local.q = buscar.value.trim().toLowerCase(); pintarTabla(); });
+  zonaSel.addEventListener('change', () => { local.zona = zonaSel.value; pintarTabla(); });
+  document.querySelectorAll('#tabla-hipotesis th button[data-sort]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const k = b.dataset.sort;
+      if (local.sort === k) local.dir = -local.dir;
+      else { local.sort = k; local.dir = CLAVE_NUM.includes(k) ? -1 : 1; }
+      pintarTabla();
+    });
+  });
+  const tbody = document.querySelector('#tabla-hipotesis tbody');
+  tbody.addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-key]');
+    if (tr) elegir(tr.dataset.key);
+  });
+  tbody.addEventListener('keydown', (e) => {
+    const tr = e.target.closest('tr[data-key]');
+    if (tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); elegir(tr.dataset.key); }
+  });
+
+  function elegir(t) {
+    const actual = dash.params().activo || null;
+    dash.setParams({ activo: actual === t ? null : t });
+  }
+
+  // ---------- Ayudas de dibujo ----------
+  function lienzo(box, H) {
+    const W = Math.max(240, Math.floor(box.clientWidth || 0));
+    box.style.minHeight = H + 'px';
+    const svg = d3.select(box).selectAll('svg').data([null]).join('svg')
+      .attr('width', '100%').attr('height', H).attr('viewBox', '0 0 ' + W + ' ' + H);
+    svg.selectAll('*').remove();
+    return { svg, W };
+  }
+  function medidor(svg) {
+    const t = svg.append('text').attr('x', -1000).attr('y', -1000);
+    const m = (s, clase) => { t.attr('class', clase || null).text(s); return t.node().getComputedTextLength(); };
+    m.fin = () => t.remove();
+    return m;
+  }
+  function anchoDe(box) { return Math.max(240, Math.floor(box.clientWidth || 0)); }
+  function tooltipDe(box) {
+    let tip = box.querySelector(':scope > .hx-tip');
+    if (!tip) { tip = document.createElement('div'); tip.className = 'hx-tip'; tip.hidden = true; box.appendChild(tip); }
+    return {
+      show(e, lineas) {
+        tip.replaceChildren(...lineas.map((l, i) => {
+          const row = document.createElement('div');
+          if (i === 0) { row.className = 'k'; row.textContent = l[0]; }
+          else {
+            const a = document.createElement('span'); a.className = 'k'; a.textContent = l[0] + ': ';
+            const b = document.createElement('span'); b.textContent = l[1];
+            row.append(a, b);
+          }
+          return row;
+        }));
+        tip.hidden = false;
+        const r = box.getBoundingClientRect();
+        const tw = tip.offsetWidth, th = tip.offsetHeight;
+        let left = e.clientX - r.left + 14, top = e.clientY - r.top + 14;
+        if (left + tw > r.width - 2) left = e.clientX - r.left - tw - 14;
+        if (top + th > r.height - 2) top = e.clientY - r.top - th - 14;
+        tip.style.left = Math.max(2, Math.min(left, r.width - tw - 2)) + 'px';
+        tip.style.top = Math.max(2, top) + 'px';
+      },
+      hide() { tip.hidden = true; },
+    };
+  }
+  const pctO = (v) => (v == null ? '—' : pct1(v));
+  function lineasDe(d) {
+    const L = [
+      [(d.top === 'TOP' ? '★ ' : '') + d.activo + (d.empresa ? ' · ' + d.empresa : '')],
+      ['Zona', d.grupo + ' · ' + d.zona_actual],
+      ['Precio informe → último', dinero(d.precio, d.moneda) + ' → ' + dinero(d.precio_hoy, d.moneda_hoy)],
+      ['Cambio desde el informe', pctO(d.cambio)],
+      ['Escenario base', dinero(d.escenario_base, d.moneda)],
+      ['Potencial a base', pctO(d.pot_hoy) + ' último · ' + pctO(d.potencial) + ' informe'],
+      ['Variación hipótesis', pctO(d.vari_hoy) + ' último (est.) · ' + pctO(d.variacion) + ' informe'],
+      ['% activo de la posición', d.posicion_abierta == null ? '—' : pct0(d.posicion_abierta)],
+      ['Desde', d.desde_texto],
+    ];
+    if (d.tipo_precio) L.push(['Precio IBKR', d.tipo_precio + (d.hora_bogota ? ' · ' + d.hora_bogota : '')]);
+    return L;
+  }
+  function vacio(box, texto) {
+    const p = document.createElement('p'); p.className = 'hx-empty'; p.textContent = texto;
+    box.querySelectorAll(':scope > svg').forEach((n) => n.remove());
+    box.appendChild(p);
+  }
+  function limpiar(box) { box.querySelectorAll(':scope > .hx-empty, :scope > .hx-fail').forEach((n) => n.remove()); box.classList.remove('dash-skeleton'); }
+  function pendiente(box, status) {
+    box.replaceChildren();
+    box.style.minHeight = '160px';
+    box.classList.toggle('dash-skeleton', status === 'loading');
+    if (status !== 'loading') { const f = document.createElement('div'); f.className = 'hx-fail'; f.textContent = 'No se pudo cargar'; box.appendChild(f); }
+  }
+
+  // ---------- Gráficos de barras por activo (potencial y cambio) ----------
+  function dibujarBarras(box, filas, activo, valor, ref, textoVacio) {
+    limpiar(box);
+    const data = filas.filter((d) => valor(d) != null).sort((a, b) => valor(b) - valor(a) || a.activo.localeCompare(b.activo));
+    if (!data.length) { box.style.minHeight = '160px'; vacio(box, textoVacio); return; }
+    const refDe = (d) => (ref ? ref(d) : null);
+    const step = 20, bh = 12, mt = 4, mb = 26;
+    const H = mt + data.length * step + mb;
+    const { svg, W } = lienzo(box, H);
+    const m = medidor(svg);
+    const etiqueta = (d) => (d.top === 'TOP' ? '★ ' : '') + d.activo;
+    const tickW = d3.max(data, (d) => m(etiqueta(d), d.activo === activo ? 'hx-strong' : null)) || 0;
+    const negs = data.filter((d) => valor(d) < 0);
+    const poss = data.filter((d) => valor(d) >= 0);
+    const negW = negs.length ? d3.max(negs, (d) => m(pct1(valor(d)))) + 8 : 0;
+    const posW = poss.length ? d3.max(poss, (d) => m(pct1(valor(d)))) + 8 : 0;
+    const extremos = data.flatMap((d) => [valor(d), refDe(d)]).filter((v) => v != null);
+    const lo = Math.min(0, d3.min(extremos));
+    const hi = Math.max(0, d3.max(extremos));
+    const x0 = tickW + 10 + negW;
+    const x1 = Math.max(x0 + 60, W - posW - 2);
+    const x = d3.scaleLinear([lo, hi], [x0, x1]);
+    let ticks = x.ticks(Math.max(2, Math.floor((x1 - x0) / 90)));
+    const tw = d3.max(ticks, (t) => m(pct0(t))) || 0;
+    ticks = ticks.filter((t) => x(t) - tw / 2 >= 0 && x(t) + tw / 2 <= W);
+    m.fin();
+    const g = svg.append('g');
+    g.selectAll('line.grid').data(ticks).join('line').attr('class', 'grid')
+      .attr('x1', (t) => x(t)).attr('x2', (t) => x(t)).attr('y1', mt).attr('y2', H - mb + 4)
+      .style('stroke', 'var(--cds-chart-grid)').attr('stroke-width', 1);
+    g.append('line').attr('x1', x(0)).attr('x2', x(0)).attr('y1', mt).attr('y2', H - mb + 4)
+      .style('stroke', 'var(--cds-chart-axis)').attr('stroke-width', 1);
+    g.selectAll('text.tick').data(ticks).join('text').attr('class', 'tick')
+      .attr('x', (t) => x(t)).attr('y', H - 6).attr('text-anchor', 'middle').text((t) => pct0(t));
+    const tip = tooltipDe(box);
+    const filasG = svg.append('g').selectAll('g').data(data).join('g')
+      .attr('transform', (d, i) => 'translate(0,' + (mt + i * step) + ')');
+    filasG.append('rect').attr('class', 'hx-hit').attr('x', 0).attr('y', 0).attr('width', W).attr('height', step).attr('fill', 'transparent');
+    filasG.append('rect')
+      .attr('x', (d) => Math.min(x(0), x(valor(d))))
+      .attr('y', (step - bh) / 2)
+      .attr('width', (d) => Math.max(1.5, Math.abs(x(valor(d)) - x(0))))
+      .attr('height', bh).attr('rx', 3)
+      .style('fill', (d) => colorDe(d.grupo))
+      .attr('fill-opacity', (d) => (activo && d.activo !== activo ? 0.28 : 1))
+      .attr('pointer-events', 'none');
+    if (ref) {
+      filasG.filter((d) => refDe(d) != null).append('line')
+        .attr('x1', (d) => x(refDe(d))).attr('x2', (d) => x(refDe(d)))
+        .attr('y1', (step - bh) / 2 - 3).attr('y2', (step + bh) / 2 + 3)
+        .style('stroke', 'var(--color-fg)').attr('stroke-width', 2).attr('stroke-linecap', 'round')
+        .attr('stroke-opacity', (d) => (activo && d.activo !== activo ? 0.25 : 0.85))
+        .attr('pointer-events', 'none');
+    }
+    const fin = (d) => {
+      const v = valor(d), r = refDe(d);
+      if (v >= 0) return r != null && r > v ? x(r) + 1 : x(v);
+      return r != null && r < v ? x(r) - 1 : x(v);
+    };
+    const rotulos = filasG.append('text')
+      .attr('x', tickW).attr('y', step / 2).attr('dy', '0.35em').attr('text-anchor', 'end')
+      .attr('class', (d) => (d.activo === activo ? 'hx-strong' : null))
+      .attr('pointer-events', 'none');
+    rotulos.filter((d) => d.top === 'TOP').append('tspan').attr('class', 'hx-star-t').text('★ ');
+    rotulos.append('tspan').text((d) => d.activo);
+    filasG.append('text')
+      .attr('x', (d) => (valor(d) < 0 ? fin(d) - 4 : fin(d) + 4))
+      .attr('y', step / 2).attr('dy', '0.35em')
+      .attr('text-anchor', (d) => (valor(d) < 0 ? 'end' : 'start'))
+      .attr('pointer-events', 'none')
+      .text((d) => pct1(valor(d)));
+    filasG.on('click', (e, d) => elegir(d.activo))
+      .on('pointermove', (e, d) => tip.show(e, lineasDe(d)))
+      .on('pointerleave', () => tip.hide());
+  }
+
+  // ---------- Gráfico: variación frente a potencial ----------
+  function dibujarDispersion(box, filas, activo) {
+    limpiar(box);
+    const data = filas.filter((d) => d.pot != null && d.vari != null);
+    if (!data.length) { box.style.minHeight = '160px'; vacio(box, 'Ningún activo con variación y potencial para estos filtros.'); return; }
+    const W0 = anchoDe(box);
+    const H = Math.round(Math.max(260, Math.min(400, W0 * 0.72)));
+    const { svg, W } = lienzo(box, H);
+    const m = medidor(svg);
+    const xlo = Math.min(0, d3.min(data, (d) => d.vari)), xhi = Math.max(0, d3.max(data, (d) => d.vari));
+    const ylo = Math.min(0, d3.min(data, (d) => d.pot)), yhi = Math.max(0, d3.max(data, (d) => d.pot));
+    const padX = (xhi - xlo) * 0.06 || 0.1, padY = (yhi - ylo) * 0.06 || 0.1;
+    const xs = d3.scaleLinear([xlo - padX, xhi + padX], [0, 1]).nice();
+    const ys = d3.scaleLinear([ylo - padY, yhi + padY], [0, 1]).nice();
+    const yTicks = ys.ticks(5);
+    const ml = (d3.max(yTicks, (t) => m(pct0(t))) || 0) + 8;
+    const mr = 6, mt = 8, mb = 24;
+    const x = xs.copy().range([ml, W - mr]);
+    const y = ys.copy().range([H - mb, mt]);
+    let xTicks = x.ticks(Math.max(2, Math.floor((W - ml - mr) / 80)));
+    const xtw = d3.max(xTicks, (t) => m(pct0(t))) || 0;
+    xTicks = xTicks.filter((t) => x(t) - xtw / 2 >= 0 && x(t) + xtw / 2 <= W);
+    const g = svg.append('g');
+    g.selectAll('line.gx').data(xTicks).join('line').attr('class', 'gx')
+      .attr('x1', (t) => x(t)).attr('x2', (t) => x(t)).attr('y1', mt).attr('y2', H - mb)
+      .style('stroke', 'var(--cds-chart-grid)').attr('stroke-width', 1);
+    g.selectAll('line.gy').data(yTicks).join('line').attr('class', 'gy')
+      .attr('x1', ml).attr('x2', W - mr).attr('y1', (t) => y(t)).attr('y2', (t) => y(t))
+      .style('stroke', 'var(--cds-chart-grid)').attr('stroke-width', 1);
+    g.append('line').attr('x1', x(0)).attr('x2', x(0)).attr('y1', mt).attr('y2', H - mb)
+      .style('stroke', 'var(--cds-chart-reference)').attr('stroke-dasharray', '4 3');
+    g.append('line').attr('x1', ml).attr('x2', W - mr).attr('y1', y(0)).attr('y2', y(0))
+      .style('stroke', 'var(--cds-chart-reference)').attr('stroke-dasharray', '4 3');
+    g.selectAll('text.tx').data(xTicks).join('text').attr('class', 'tx')
+      .attr('x', (t) => x(t)).attr('y', H - 6).attr('text-anchor', 'middle').text((t) => pct0(t));
+    g.selectAll('text.ty').data(yTicks).join('text').attr('class', 'ty')
+      .attr('x', ml - 6).attr('y', (t) => y(t)).attr('dy', '0.35em').attr('text-anchor', 'end').text((t) => pct0(t));
+    // títulos de ejes dentro del área
+    const cajas = [];
+    const titX = 'Variación desde el inicio →';
+    const titY = '↑ Potencial al escenario base';
+    const wX = m(titX), wY = m(titY);
+    g.append('text').attr('x', W - mr - 4).attr('y', H - mb - 6).attr('text-anchor', 'end').text(titX);
+    cajas.push({ x0: W - mr - 4 - wX, x1: W - mr - 4, y0: H - mb - 18, y1: H - mb - 2 });
+    g.append('text').attr('x', ml + 4).attr('y', mt + 12).attr('text-anchor', 'start').text(titY);
+    cajas.push({ x0: ml + 4, x1: ml + 4 + wY, y0: mt, y1: mt + 16 });
+    const pts = data.map((d) => ({ d, px: x(d.vari), py: y(d.pot) }));
+    // las TOP se dibujan como estrellas; el resto, como círculos
+    const esTop = (p) => p.d.top === 'TOP';
+    const esElegido = (p) => p.d.activo === activo;
+    const forma = d3.symbol()
+      .type((p) => (esTop(p) ? d3.symbolStar : d3.symbolCircle))
+      .size((p) => (esTop(p) ? (esElegido(p) ? 170 : 90) : (esElegido(p) ? 133 : 64)));
+    const capaDe = (p) => (esElegido(p) ? 2 : esTop(p) ? 1 : 0);
+    svg.append('g').selectAll('path').data(pts.slice().sort((a, b) => capaDe(a) - capaDe(b))).join('path')
+      .attr('transform', (p) => 'translate(' + p.px + ',' + p.py + ')')
+      .attr('d', forma)
+      .style('fill', (p) => colorDe(p.d.grupo))
+      .attr('fill-opacity', (p) => (activo && !esElegido(p) ? 0.28 : 0.92))
+      .style('stroke', (p) => (esElegido(p) ? 'var(--color-fg)' : 'var(--color-panel)'))
+      .attr('stroke-width', (p) => (esElegido(p) ? 2 : 1))
+      .attr('stroke-linejoin', 'round');
+    // etiquetas sin solaparse: primero el activo elegido y los puntos más alejados del cruce
+    const capa = svg.append('g');
+    const alto = 12;
+    const dentro = (b) => b.x0 >= ml + 1 && b.x1 <= W - mr - 1 && b.y0 >= mt && b.y1 <= H - mb - 1;
+    const choca = (b) => cajas.some((o) => !(b.x1 + 2 < o.x0 || b.x0 - 2 > o.x1 || b.y1 < o.y0 || b.y0 > o.y1));
+    const radio = (q) => (q.d.top === 'TOP' ? 7 : 4);
+    const tapa = (b, yo) => pts.some((q) => q !== yo && q.px + radio(q) >= b.x0 && q.px - radio(q) <= b.x1 && q.py + radio(q) >= b.y0 && q.py - radio(q) <= b.y1);
+    const prioridad = (p) => (p.d.activo === activo ? 1e6 : 0) + Math.abs(p.px - x(0)) / W + Math.abs(p.py - y(0)) / H;
+    for (const p of pts.slice().sort((a, b) => prioridad(b) - prioridad(a))) {
+      const clase = p.d.activo === activo ? 'hx-strong' : null;
+      const w = m(p.d.activo, clase);
+      const sep = (p.d.top === 'TOP' ? 10 : 7) + (p.d.activo === activo ? 3 : 0);
+      const opciones = [
+        { x: p.px + sep, y: p.py + 4, a: 'start', x0: p.px + sep },
+        { x: p.px - sep, y: p.py + 4, a: 'end', x0: p.px - sep - w },
+        { x: p.px, y: p.py - sep - 1, a: 'middle', x0: p.px - w / 2 },
+        { x: p.px, y: p.py + sep + 9, a: 'middle', x0: p.px - w / 2 },
+      ];
+      for (const o of opciones) {
+        const b = { x0: o.x0, x1: o.x0 + w, y0: o.y - alto + 2, y1: o.y + 2 };
+        if (dentro(b) && !choca(b) && (p.d.activo === activo || !tapa(b, p))) {
+          cajas.push(b);
+          capa.append('text').attr('x', o.x).attr('y', o.y).attr('text-anchor', o.a).attr('class', clase).text(p.d.activo);
+          break;
+        }
+      }
+    }
+    m.fin();
+    const tip = tooltipDe(box);
+    const del = d3.Delaunay.from(pts, (p) => p.px, (p) => p.py);
+    const cerca = (e) => {
+      const [mx, my] = d3.pointer(e);
+      const i = del.find(mx, my);
+      const p = pts[i];
+      return p && Math.hypot(p.px - mx, p.py - my) < 28 ? p : null;
+    };
+    const aro = svg.append('circle').attr('r', 8).attr('fill', 'none').style('stroke', 'var(--color-fg)').attr('stroke-width', 1.5).attr('visibility', 'hidden').attr('pointer-events', 'none');
+    svg.append('rect').attr('class', 'hx-hit').attr('x', ml).attr('y', mt).attr('width', Math.max(0, W - ml - mr)).attr('height', Math.max(0, H - mt - mb)).attr('fill', 'transparent')
+      .on('pointermove', (e) => {
+        const p = cerca(e);
+        if (p) { aro.attr('cx', p.px).attr('cy', p.py).attr('r', p.d.top === 'TOP' ? 11 : 8).attr('visibility', 'visible'); tip.show(e, lineasDe(p.d)); }
+        else { aro.attr('visibility', 'hidden'); tip.hide(); }
+      })
+      .on('pointerleave', () => { aro.attr('visibility', 'hidden'); tip.hide(); })
+      .on('click', (e) => { const p = cerca(e); if (p) elegir(p.d.activo); });
+  }
+
+  // ---------- Gráfico: hipótesis por zona actual ----------
+  function dibujarZona(filtro) {
+    const box = document.getElementById('chart-zona');
+    const r = dash.data('por_zona');
+    if (r.status !== 'ok') { pendiente(box, r.status); return; }
+    limpiar(box);
+    const data = r.data.filter((x) => x.top === filtro.top && (filtro.grupo === 'Todas' || x.grupo === filtro.grupo))
+      .sort((a, b) => GRUPOS.indexOf(a.grupo) - GRUPOS.indexOf(b.grupo) || b.n - a.n || a.zona_actual.localeCompare(b.zona_actual));
+    if (!data.length) { box.style.minHeight = '120px'; vacio(box, 'Ninguna hipótesis para estos filtros.'); return; }
+    const step = 22, bh = 12, mt = 2, mb = 2;
+    const H = mt + data.length * step + mb;
+    const { svg, W } = lienzo(box, H);
+    const m = medidor(svg);
+    const lw = d3.max(data, (d) => m(d.zona_actual)) || 0;
+    const vw = d3.max(data, (d) => m(String(d.n))) || 0;
+    m.fin();
+    const x0 = lw + 10, x1 = Math.max(x0 + 40, W - vw - 8);
+    const x = d3.scaleLinear([0, d3.max(data, (d) => d.n)], [x0, x1]);
+    const gr = svg.append('g').selectAll('g').data(data).join('g').attr('transform', (d, i) => 'translate(0,' + (mt + i * step) + ')');
+    gr.append('text').attr('x', lw).attr('y', step / 2).attr('dy', '0.35em').attr('text-anchor', 'end').text((d) => d.zona_actual);
+    gr.append('rect').attr('x', x0).attr('y', (step - bh) / 2).attr('width', (d) => Math.max(1.5, x(d.n) - x0)).attr('height', bh).attr('rx', 3).style('fill', (d) => colorDe(d.grupo));
+    gr.append('text').attr('x', (d) => x(d.n) + 4).attr('y', step / 2).attr('dy', '0.35em').attr('class', 'hx-strong').text((d) => String(d.n));
+  }
+
+  // ---------- Gráficos apilados: año de inicio y % activo ----------
+  function dibujarApilado(id, calcId, campo, filtro, etiqueta, orden) {
+    const box = document.getElementById(id);
+    const r = dash.data(calcId);
+    if (r.status !== 'ok') { pendiente(box, r.status); return; }
+    limpiar(box);
+    const filas = r.data.filter((x) => x.top === filtro.top);
+    const cats = [...new Set(filas.map((x) => x[campo]))].sort(orden);
+    const series = filtro.grupo === 'Todas' ? GRUPOS : [filtro.grupo];
+    const n = (c, g) => { const f = filas.find((x) => x[campo] === c && x.grupo === g); return f ? f.n : 0; };
+    const step = 24, bh = 14, mt = 2, mb = 2;
+    const H = mt + cats.length * step + mb;
+    const { svg, W } = lienzo(box, H);
+    const m = medidor(svg);
+    const lw = d3.max(cats, (c) => m(etiqueta(c))) || 0;
+    const vw = d3.max(cats, (c) => m(String(n(c, filtro.grupo)), 'hx-strong')) || 0;
+    m.fin();
+    const x0 = lw + 10, x1 = Math.max(x0 + 40, W - vw - 8);
+    const maxN = d3.max(cats, (c) => n(c, filtro.grupo)) || 1;
+    const x = d3.scaleLinear([0, maxN], [x0, x1]);
+    const gr = svg.append('g').selectAll('g').data(cats).join('g').attr('transform', (c, i) => 'translate(0,' + (mt + i * step) + ')');
+    gr.append('text').attr('x', lw).attr('y', step / 2).attr('dy', '0.35em').attr('text-anchor', 'end').text((c) => etiqueta(c));
+    gr.each(function (c) {
+      let acc = 0;
+      const sel = d3.select(this);
+      for (const g of series) {
+        const v = n(c, g);
+        if (!v) continue;
+        sel.append('rect').attr('x', x(acc)).attr('y', (step - bh) / 2).attr('width', Math.max(1, x(acc + v) - x(acc) - (series.length > 1 ? 1 : 0))).attr('height', bh).attr('rx', 2).style('fill', colorDe(g));
+        acc += v;
+      }
+      sel.append('text').attr('x', x(n(c, filtro.grupo)) + 4).attr('y', step / 2).attr('dy', '0.35em').attr('class', 'hx-strong').text(String(n(c, filtro.grupo)));
+    });
+  }
+
+  // ---------- Tabla ----------
+  function td(texto, clase) { const c = document.createElement('td'); if (clase) c.className = clase; c.textContent = texto; return c; }
+  function pintarTabla() {
+    const vacia = document.getElementById('tabla-vacia');
+    let filas = ultimo.visibles.filter((d) => (!local.zona || d.zona_actual === local.zona)
+      && (!local.q || d.activo.toLowerCase().includes(local.q) || (d.empresa || '').toLowerCase().includes(local.q)));
+    if (local.sort) {
+      const k = local.sort;
+      const nulo = (v) => v == null || v === '';
+      filas = filas.slice().sort((a, b) => {
+        const va = a[k], vb = b[k];
+        if (nulo(va) && nulo(vb)) return 0;
+        if (nulo(va)) return 1;
+        if (nulo(vb)) return -1;
+        const c = CLAVE_NUM.includes(k) ? va - vb : String(va).localeCompare(String(vb), 'es');
+        return c * local.dir;
+      });
+    } else {
+      filas = filas.slice().sort((a, b) => GRUPOS.indexOf(a.grupo) - GRUPOS.indexOf(b.grupo) || a.orden - b.orden);
+    }
+    const maxPot = d3.max(ultimo.visibles, (d) => d.pot) || 1;
+    tbody.replaceChildren(...filas.map((d) => {
+      const tr = document.createElement('tr');
+      tr.dataset.key = d.activo;
+      tr.tabIndex = 0;
+      if (d.activo === ultimo.activo) tr.className = 'is-sel';
+      const cA = document.createElement('td'); const sA = document.createElement('span'); sA.className = 'hx-tk'; sA.textContent = d.activo; cA.append(sA);
+      const cG = document.createElement('td'); cG.className = 'hx-sec'; const dot = document.createElement('span'); dot.className = 'hx-dot'; dot.style.background = colorDe(d.grupo); cG.append(dot, document.createTextNode(d.grupo));
+      const cZ = document.createElement('td'); const pz = document.createElement('span'); pz.className = 'hx-pill'; pz.textContent = d.zona_actual; cZ.append(pz);
+      const cT = document.createElement('td'); if (d.top) { const pt = document.createElement('span'); pt.className = 'hx-pill'; pt.textContent = d.top; cT.append(pt); }
+      const cP = document.createElement('td'); cP.className = 'num';
+      if (d.pot == null) { cP.classList.add('hx-muted'); cP.textContent = '—'; }
+      else {
+        const w = document.createElement('span'); w.className = 'hx-potcell';
+        const bar = document.createElement('span'); bar.className = 'hx-bar';
+        bar.style.width = (d.pot > 0 ? Math.max(2, Math.round(48 * d.pot / maxPot)) : 0) + 'px';
+        bar.style.background = colorDe(d.grupo);
+        const t = document.createElement('span'); t.textContent = pct1(d.pot);
+        w.append(bar, t); cP.append(w);
+      }
+      tr.append(
+        cA,
+        td(d.empresa || '', 'hx-sec hx-muted'),
+        cG,
+        cZ,
+        cT,
+        td(dinero(d.precio, d.moneda), 'num' + (d.precio == null ? ' hx-muted' : '')),
+        td(dinero(d.precio_hoy, d.moneda_hoy), 'num' + (d.precio_hoy == null ? ' hx-muted' : '')),
+        td(d.cambio == null ? '—' : pct1(d.cambio), 'num ' + signo(d.cambio)),
+        td(d.vari == null ? '—' : pct1(d.vari), 'num ' + signo(d.vari)),
+        td(dinero(d.escenario_base, d.moneda), 'num' + (d.escenario_base == null ? ' hx-muted' : '')),
+        cP,
+        td(d.posicion_abierta == null ? '—' : pct0(d.posicion_abierta), 'num hx-sec'),
+        td(d.desde_texto, 'hx-sec'),
+        td(d.tipo_precio, 'hx-sec hx-muted'),
+      );
+      return tr;
+    }));
+    vacia.hidden = filas.length > 0;
+    document.querySelectorAll('#tabla-hipotesis th').forEach((th) => {
+      const b = th.querySelector('button[data-sort]');
+      th.setAttribute('aria-sort', b && b.dataset.sort === local.sort ? (local.dir > 0 ? 'ascending' : 'descending') : 'none');
+    });
+  }
+  function llenarZonas(filas) {
+    const opciones = [...new Map(filas.map((d) => [d.zona_actual, d.grupo])).entries()]
+      .sort((a, b) => GRUPOS.indexOf(a[1]) - GRUPOS.indexOf(b[1]) || a[0].localeCompare(b[0], 'es'));
+    const actual = local.zona;
+    zonaSel.replaceChildren(new Option('Todas las zonas actuales', ''), ...opciones.map(([z]) => new Option(z, z)));
+    zonaSel.value = opciones.some(([z]) => z === actual) ? actual : '';
+    local.zona = zonaSel.value;
+  }
+  function ajustarColumnas(base) {
+    const pares = [['th-variacion', 'variacion_hoy', 'variacion'], ['th-potencial', 'potencial_hoy', 'potencial']];
+    for (const [id, campoHoy, campoInforme] of pares) {
+      const th = document.getElementById(id);
+      if (base === 'hoy') { th.dataset.source = 'actual'; th.dataset.field = campoHoy; }
+      else { delete th.dataset.source; th.dataset.field = campoInforme; }
+    }
+  }
+
+  // ---------- Notas ----------
+  function nota(fuente, activos, texto) {
+    const li = document.createElement('li');
+    activos.forEach((t, i) => {
+      if (i) li.append(document.createTextNode(', '));
+      const b = document.createElement('b');
+      b.dataset.source = fuente; b.dataset.field = 'activo'; b.dataset.where = donde({ activo: t });
+      b.textContent = t;
+      li.append(b);
+    });
+    const s = document.createElement('span');
+    s.dataset.source = fuente; s.dataset.field = 'nota'; s.dataset.where = donde({ activo: activos[0] });
+    s.textContent = texto;
+    li.append(document.createTextNode(': '), s);
+    return li;
+  }
+  function pintarNotas(filas) {
+    document.getElementById('notas-lista').replaceChildren(...filas.filter((d) => d.nota).map((d) => nota('hipotesis', [d.activo], d.nota)));
+  }
+  function pintarNotasPrecios() {
+    const ul = document.getElementById('notas-precios');
+    const r = dash.data('precios_ibkr');
+    if (r.status !== 'ok') { ul.replaceChildren(); return; }
+    const grupos = new Map();
+    for (const p of r.data || []) {
+      if (!p.nota) continue;
+      if (!grupos.has(p.nota)) grupos.set(p.nota, []);
+      grupos.get(p.nota).push(p.activo);
+    }
+    ul.replaceChildren(...[...grupos].map(([texto, activos]) => nota('precios_ibkr', activos, texto)));
+  }
+
+  // ---------- Cabecera e indicadores ----------
+  function textosBase(base) {
+    document.querySelectorAll('[data-texto-hoy]').forEach((el) => { el.textContent = base === 'hoy' ? el.dataset.textoHoy : el.dataset.textoInforme; });
+    document.querySelectorAll('.hx-ref').forEach((el) => { el.hidden = base !== 'hoy'; });
+  }
+  function pintarCabecera(filtro) {
+    const r = dash.data('resumen');
+    document.querySelectorAll('[data-lead]').forEach((el) => {
+      const [g, f] = el.dataset.lead.split('|');
+      el.dataset.where = donde({ base: filtro.base, grupo: g, top: 'Todas' });
+      const row = r.status === 'ok' ? r.data.find((x) => x.base === filtro.base && x.grupo === g && x.top === 'Todas') : null;
+      el.textContent = row ? fmtCampo(f, row[f]) : '—';
+      el.classList.toggle('dash-skeleton', !row && r.status === 'loading');
+    });
+  }
+  function marcaCambio(x) {
+    const frag = document.createDocumentFragment();
+    const w = donde({ activo: x.activo });
+    const b = document.createElement('b');
+    b.dataset.source = 'actual'; b.dataset.field = 'activo'; b.dataset.where = w;
+    b.textContent = x.activo;
+    const c = document.createElement('b');
+    c.dataset.source = 'actual'; c.dataset.field = 'cambio_desde_informe'; c.dataset.where = w;
+    c.textContent = pct1(x.cambio_desde_informe);
+    frag.append(b, document.createTextNode(' ('), c, document.createTextNode(')'));
+    return frag;
+  }
+  function pintarMovimientos() {
+    const a = dash.data('actual');
+    const caidas = document.getElementById('lead-caidas');
+    const subida = document.getElementById('lead-subida');
+    caidas.classList.toggle('dash-skeleton', a.status === 'loading');
+    subida.classList.toggle('dash-skeleton', a.status === 'loading');
+    if (a.status !== 'ok') { caidas.textContent = '—'; subida.textContent = '—'; return; }
+    const orden = (a.data || []).filter((x) => x.cambio_desde_informe != null)
+      .sort((p, q) => p.cambio_desde_informe - q.cambio_desde_informe || String(p.activo).localeCompare(String(q.activo)));
+    const bajan = orden.filter((x) => x.cambio_desde_informe < 0).slice(0, 3);
+    const mayor = orden[orden.length - 1];
+    const sube = mayor && mayor.cambio_desde_informe > 0 ? mayor : null;
+    const frag = document.createDocumentFragment();
+    bajan.forEach((x, i) => {
+      if (i) frag.append(document.createTextNode(i === bajan.length - 1 ? ' y ' : ', '));
+      frag.append(marcaCambio(x));
+    });
+    caidas.replaceChildren(bajan.length ? frag : document.createTextNode('ninguna'));
+    subida.replaceChildren(sube ? marcaCambio(sube) : document.createTextNode('ninguna'));
+  }
+  function pintarEstado() {
+    const r = dash.data('estado_precios');
+    const row = r.status === 'ok' && r.data && r.data.length ? r.data[0] : null;
+    document.querySelectorAll('[data-estado]').forEach((el) => {
+      const f = el.dataset.estado;
+      el.textContent = row && row[f] != null ? String(row[f]) : '—';
+      el.classList.toggle('dash-skeleton', !row && r.status === 'loading');
+    });
+    document.getElementById('estado-otros').hidden = !(row && row.n_otro_dia > 0);
+  }
+  function pintarIndicadores(filtro) {
+    const r = dash.data('resumen');
+    const busca = (b) => (r.status === 'ok' ? r.data.find((x) => x.base === b && x.grupo === filtro.grupo && x.top === filtro.top) : null);
+    const row = busca(filtro.base);
+    const ref = busca('informe');
+    document.querySelectorAll('[data-kpi]').forEach((el) => {
+      const f = el.dataset.kpi;
+      el.dataset.where = donde({ base: filtro.base, grupo: filtro.grupo, top: filtro.top });
+      el.textContent = row ? fmtCampo(f, row[f]) : '—';
+      el.classList.toggle('dash-skeleton', !row && r.status === 'loading');
+    });
+    document.querySelectorAll('[data-kpi-ref]').forEach((el) => {
+      const f = el.dataset.kpiRef;
+      el.dataset.where = donde({ base: 'informe', grupo: filtro.grupo, top: filtro.top });
+      el.textContent = ref ? fmtCampo(f, ref[f]) : '—';
+      el.classList.toggle('dash-skeleton', !ref && r.status === 'loading');
+    });
+  }
+
+  function estadoSinDatos(status) {
+    document.querySelectorAll('.hx-chart').forEach((box) => pendiente(box, status));
+    tbody.replaceChildren();
+    document.getElementById('tabla-vacia').hidden = true;
+    document.getElementById('notas-lista').replaceChildren();
+  }
+
+  const fila = (d) => ({
+    ...d,
+    orden: val(d.orden),
+    precio: val(d.precio),
+    variacion: val(d.variacion),
+    escenario_base: val(d.escenario_base),
+    potencial: val(d.potencial),
+    posicion_abierta: val(d.posicion_abierta),
+    anio_inicio: val(d.anio_inicio),
+  });
+  function unir(d, mapaHoy, base) {
+    const a = (mapaHoy && mapaHoy.get(d.activo)) || {};
+    const r = {
+      ...d,
+      precio_hoy: val(a.precio_hoy),
+      moneda_hoy: a.moneda_hoy || '',
+      cambio: val(a.cambio_desde_informe),
+      pot_hoy: val(a.potencial_hoy),
+      vari_hoy: val(a.variacion_hoy),
+      tipo_precio: a.tipo_precio || '',
+      hora_bogota: a.hora_bogota || '',
+    };
+    r.pot = base === 'hoy' ? r.pot_hoy : r.potencial;
+    r.vari = base === 'hoy' ? r.vari_hoy : r.variacion;
+    return r;
+  }
+
+  dash.onData(() => {
+    const p = dash.params();
+    const base = p.base === 'informe' ? 'informe' : 'hoy';
+    const filtro = { base, grupo: p.grupo || 'Todas', top: p.top || 'Todas' };
+    const activo = p.activo || null;
+    segBase.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.base === base)));
+    segGrupo.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.grupo === filtro.grupo)));
+    segTop.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.top === filtro.top)));
+    elegido.hidden = !activo;
+    elegido.textContent = activo ? activo + ' ×' : '';
+    elegido.setAttribute('aria-label', activo ? 'Quitar el resaltado de ' + activo : 'Quitar resaltado');
+    textosBase(base);
+    ajustarColumnas(base);
+    pintarEstado();
+    pintarCabecera(filtro);
+    pintarMovimientos();
+    pintarIndicadores(filtro);
+    pintarNotasPrecios();
+    const h = dash.data('hipotesis');
+    if (h.status !== 'ok') { estadoSinDatos(h.status); return; }
+    const a = dash.data('actual');
+    const hoyOk = a.status === 'ok';
+    const mapaHoy = hoyOk ? new Map((a.data || []).map((x) => [x.activo, x])) : null;
+    const filas = (h.data || []).map(fila).map((d) => unir(d, mapaHoy, base));
+    const visibles = filas.filter((d) => (filtro.grupo === 'Todas' || d.grupo === filtro.grupo) && (filtro.top === 'Todas' || d.top === 'TOP'));
+    ultimo = { visibles, activo, base };
+    const boxPot = document.getElementById('chart-potencial');
+    const boxCam = document.getElementById('chart-cambio');
+    const boxDis = document.getElementById('chart-dispersion');
+    if (base === 'hoy' && !hoyOk) pendiente(boxPot, a.status);
+    else dibujarBarras(boxPot, visibles, activo, (d) => d.pot, base === 'hoy' ? (d) => d.potencial : null, 'Ningún activo con potencial para estos filtros.');
+    if (!hoyOk) pendiente(boxCam, a.status);
+    else dibujarBarras(boxCam, visibles, activo, (d) => d.cambio, null, 'Ningún activo con precio de IBKR para estos filtros.');
+    if (base === 'hoy' && !hoyOk) pendiente(boxDis, a.status);
+    else dibujarDispersion(boxDis, visibles, activo);
+    dibujarZona(filtro);
+    dibujarApilado('chart-anio', 'por_anio', 'anio', filtro, (c) => String(c), (x, y) => x - y);
+    dibujarApilado('chart-posicion', 'por_posicion', 'posicion_abierta', filtro, (c) => pct0(c), (x, y) => y - x);
+    llenarZonas(filas);
+    pintarTabla();
+    pintarNotas(filas);
+  });
+})();
+</script>
+<p class="pie">Los precios se actualizan cada día hábil después del cierre de Nueva York. Contenido educativo; no es asesoría ni recomendación de inversión.</p>
+</main>
+</body>
+</html>

@@ -69,9 +69,10 @@
   };
   leerURL();
   const v = Math.floor(Date.now() / 3.6e6); // evita la caché del navegador más de una hora
+  const leer = (u) => fetch(u, { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
   window.addEventListener('DOMContentLoaded', () => {
     Promise.all(Object.entries(FUENTES).map(([k, url]) =>
-      fetch(url + '?v=' + v).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      leer(url + '?v=' + v).catch(() => new Promise((ok) => setTimeout(ok, 1500)).then(() => leer(url + '?r=' + Date.now())))
         .then((d) => { store[k] = { status: 'ok', data: d }; })
         .catch((e) => { console.error(k, e); store[k] = { status: 'error', data: null }; })
     )).then(() => { recalcular(); avisar(); });
@@ -1139,6 +1140,152 @@
     llenarZonas(filas);
     pintarTabla();
     pintarNotas(filas);
+  });
+})();
+</script>
+<style>
+  .hx-lectura { border-top: 1px solid var(--color-border-line); padding-top: var(--cds-pad-sm); display: grid; gap: var(--cds-gap-xs); font-size: var(--cds-font-size-caption); line-height: 1.5; }
+  .hx-lectura-t { font-weight: var(--cds-font-weight-medium); color: var(--color-fg); }
+  .hx-lectura ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 2px; color: var(--color-fg-muted); }
+  .hx-lectura li b { color: var(--color-fg); font-weight: var(--cds-font-weight-medium); }
+  .hx-lectura .k-c { color: var(--color-ok); font-weight: var(--cds-font-weight-medium); }
+  .hx-lectura .k-v { color: var(--color-bad); font-weight: var(--cds-font-weight-medium); }
+  .hx-aviso { margin: 0; max-width: 80ch; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); border-left: 3px solid var(--color-border-line); padding-left: var(--cds-pad-sm); }
+</style>
+<script>
+/* Lecturas automáticas por cuadro: se recalculan con cada actualización de precios y con los filtros. */
+(() => {
+  const pct = d3.format('+.1%');
+  const num = (v) => (v == null || v === '' ? null : Number(v));
+  const TARJETAS = ['potencial', 'cambio', 'dispersion', 'zona', 'anio', 'posicion', 'tabla'];
+  const cajas = {};
+  for (const id of TARJETAS) {
+    const sec = document.getElementById(id === 'tabla' ? 'tabla' : 'card-' + id);
+    if (!sec) continue;
+    const div = document.createElement('div');
+    div.className = 'hx-lectura';
+    sec.appendChild(div);
+    cajas[id] = div;
+  }
+  const cab = document.getElementById('resumen');
+  if (cab) {
+    const p = document.createElement('p');
+    p.className = 'hx-aviso';
+    p.textContent = 'Cada cuadro trae una lectura automática de los datos («Qué mirar»). Son puntos de partida para investigar, calculados con reglas fijas a partir del informe y del último precio; no son recomendaciones de compra o venta.';
+    cab.appendChild(p);
+  }
+
+  const nombre = (d, campo) => d.activo + (campo ? ' (' + campo(d) + ')' : '');
+  const lista = (rows, n, campo) => rows.slice(0, n).map((d) => nombre(d, campo)).join(', ') + (rows.length > n ? ' y ' + (rows.length - n) + ' más' : '');
+  function pintar(id, items) {
+    const box = cajas[id];
+    if (!box) return;
+    const t = document.createElement('span');
+    t.className = 'hx-lectura-t';
+    t.textContent = 'Qué mirar';
+    const ul = document.createElement('ul');
+    const reales = items.filter(Boolean);
+    if (!reales.length) reales.push(['', 'Nada destacable con estos filtros.']);
+    for (const [tipo, texto] of reales) {
+      const li = document.createElement('li');
+      if (tipo) {
+        const k = document.createElement('span');
+        k.className = tipo === 'c' ? 'k-c' : 'k-v';
+        k.textContent = tipo === 'c' ? 'Para estudiar como compra: ' : 'Para revisar (posible venta o toma de ganancias): ';
+        li.appendChild(k);
+      }
+      li.appendChild(document.createTextNode(texto));
+      ul.appendChild(li);
+    }
+    box.replaceChildren(t, ul);
+  }
+
+  dash.onData(() => {
+    const h = dash.data('hipotesis');
+    const a = dash.data('actual');
+    if (h.status !== 'ok') { Object.values(cajas).forEach((b) => b.replaceChildren()); return; }
+    const p = dash.params();
+    const base = p.base === 'informe' ? 'informe' : 'hoy';
+    const grupo = p.grupo || 'Todas';
+    const top = p.top || 'Todas';
+    const hoy = a.status === 'ok' ? new Map(a.data.map((x) => [x.activo, x])) : new Map();
+    const filas = h.data.map((d) => {
+      const x = hoy.get(d.activo) || {};
+      const r = { ...d, potencial: num(d.potencial), variacion: num(d.variacion), posicion_abierta: num(d.posicion_abierta), anio_inicio: num(d.anio_inicio), cambio: num(x.cambio_desde_informe) };
+      r.pot = base === 'hoy' ? num(x.potencial_hoy) : r.potencial;
+      r.vari = base === 'hoy' ? num(x.variacion_hoy) : r.variacion;
+      return r;
+    }).filter((d) => (grupo === 'Todas' || d.grupo === grupo) && (top === 'Todas' || d.top === 'TOP'));
+    const fPot = (d) => pct(d.pot);
+    const fCam = (d) => pct(d.cambio);
+    const fVar = (d) => pct(d.vari);
+    const ord = (campo, dir = -1) => (x, y) => dir * (x[campo] - y[campo]) || x.activo.localeCompare(y.activo);
+    const conPot = filas.filter((d) => d.pot != null);
+
+    // Potencial
+    const masRecorrido = conPot.filter((d) => d.grupo === 'Zona de compra' && d.pot >= 0.5).sort(ord('pot'));
+    const sinRecorrido = conPot.filter((d) => d.pot <= 0).sort(ord('pot', 1));
+    pintar('potencial', [
+      masRecorrido.length && ['c', 'en zona de compra y con 50 % o más hasta el escenario base: ' + lista(masRecorrido, 5, fPot) + '.'],
+      sinRecorrido.length && ['v', 'el precio ya está en o por encima del escenario base del informe: ' + lista(sinRecorrido, 5, fPot) + '.'],
+    ]);
+
+    // Cambio desde el informe
+    const conCam = filas.filter((d) => d.cambio != null);
+    const bajaronCompra = conCam.filter((d) => d.cambio <= -0.1 && d.grupo === 'Zona de compra').sort(ord('cambio', 1));
+    const subieronObj = conCam.filter((d) => d.cambio >= 0.1 && d.grupo !== 'Zona de compra').sort(ord('cambio'));
+    const bajaronResto = conCam.filter((d) => d.cambio <= -0.2 && d.grupo !== 'Zona de compra').sort(ord('cambio', 1));
+    pintar('cambio', [
+      bajaronCompra.length && ['c', 'bajaron 10 % o más desde el informe y siguen en zona de compra, así que hoy cuestan menos que cuando se publicó: ' + lista(bajaronCompra, 5, fCam) + '.'],
+      subieronObj.length && ['v', 'subieron 10 % o más fuera de la zona de compra y su recorrido restante se redujo: ' + lista(subieronObj, 5, fCam) + '.'],
+      bajaronResto.length && ['', 'Caídas de 20 % o más fuera de la zona de compra (conviene revisar si la tesis sigue en pie): ' + lista(bajaronResto, 5, fCam) + '.'],
+    ]);
+
+    // Dispersión
+    const conAmbos = filas.filter((d) => d.pot != null && d.vari != null);
+    const arribaIzq = conAmbos.filter((d) => d.vari < 0 && d.pot >= 0.5).sort(ord('pot'));
+    const abajoDer = conAmbos.filter((d) => d.vari > 0 && d.pot < 0.1).sort(ord('vari'));
+    pintar('dispersion', [
+      arribaIzq.length && ['c', 'en pérdida desde el inicio pero con 50 % o más de potencial (más recorrido, aunque la tesis aún no se cumple): ' + lista(arribaIzq, 5, fPot) + '.'],
+      abajoDer.length && ['v', 'ya ganan desde el inicio y les queda menos de 10 % de potencial: ' + lista(abajoDer, 5, fVar) + '.'],
+    ]);
+
+    // Zona actual
+    const BARATAS = ['Bajo Deep Value', 'Deep Value', 'Bajo Value', 'Bajo histórica'];
+    const SUPERADAS = ['Por encima', 'Objetivo optimista'];
+    const baratas = filas.filter((d) => BARATAS.includes(d.zona_actual)).sort(ord('pot'));
+    const superadas = filas.filter((d) => SUPERADAS.includes(d.zona_actual)).sort(ord('activo', 0));
+    pintar('zona', [
+      baratas.length && ['c', 'el informe las etiqueta «' + BARATAS.join('», «') + '»: ' + lista(baratas, 6) + '.'],
+      superadas.length && ['v', 'etiquetadas «Por encima» u «Objetivo optimista», es decir, más allá del objetivo: ' + lista(superadas, 6) + '.'],
+      ['', 'La zona es la del informe del 21 oct; no se recalcula con el último precio.'],
+    ]);
+
+    // Año de inicio
+    const anioMax = Math.max(...filas.map((d) => d.anio_inicio || 0));
+    const viejasPerdida = filas.filter((d) => d.anio_inicio != null && d.anio_inicio <= anioMax - 3 && d.vari != null && d.vari < 0).sort(ord('vari', 1));
+    const recientes = filas.filter((d) => d.anio_inicio === anioMax && d.grupo === 'Zona de compra').sort(ord('pot'));
+    pintar('anio', [
+      recientes.length && ['c', 'hipótesis abiertas en ' + anioMax + ' que siguen en zona de compra: ' + lista(recientes, 5, fPot) + '.'],
+      viejasPerdida.length && ['v', 'abiertas en ' + (anioMax - 3) + ' o antes y todavía en pérdida (llevan tiempo sin cumplirse): ' + lista(viejasPerdida, 5, fVar) + '.'],
+    ]);
+
+    // Posición activa
+    const fPos = (d) => d3.format('.0%')(d.posicion_abierta) + ' activa';
+    const parciales = filas.filter((d) => d.posicion_abierta != null && d.posicion_abierta < 1).sort(ord('posicion_abierta', 1));
+    const completasCompra = filas.filter((d) => d.posicion_abierta === 1 && d.grupo === 'Zona de compra' && d.pot != null && d.pot >= 0.5).sort(ord('pot'));
+    pintar('posicion', [
+      completasCompra.length && ['c', 'posición completa, en zona de compra y con 50 % o más de potencial: ' + lista(completasCompra, 5, fPot) + '.'],
+      parciales.length && ['v', 'el informe ya redujo la posición (posibles tomas parciales de ganancia): ' + lista(parciales, 6, fPos) + '.'],
+    ]);
+
+    // Tabla: señales combinadas
+    const fuertes = conPot.filter((d) => d.grupo === 'Zona de compra' && d.top === 'TOP' && d.pot >= 0.5).sort(ord('pot'));
+    const cautela = conPot.filter((d) => d.grupo === 'Zona de objetivos' && (d.pot <= 0 || (d.posicion_abierta != null && d.posicion_abierta < 1))).sort(ord('pot', 1));
+    pintar('tabla', [
+      fuertes.length && ['c', 'coinciden tres señales (zona de compra, etiqueta TOP y 50 % o más de potencial): ' + lista(fuertes, 8, fPot) + '.'],
+      cautela.length && ['v', 'en zona de objetivos y sin recorrido o con la posición ya reducida: ' + lista(cautela, 8, fPot) + '.'],
+    ]);
   });
 })();
 </script>
